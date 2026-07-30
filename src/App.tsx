@@ -14,7 +14,10 @@ import {
   ExternalLink,
   Image as ImageIcon,
   Download,
-  Video
+  Video,
+  Key,
+  Settings,
+  X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -68,6 +71,28 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"post" | "video">("post");
   const [videoGenerated, setVideoGenerated] = useState(false);
 
+  // API Key management for GitHub Pages / Static Hosting
+  const [userApiKey, setUserApiKey] = useState(() => localStorage.getItem("user_gemini_api_key") || "");
+  const [showKeyModal, setShowKeyModal] = useState(false);
+  const [tempApiKey, setTempApiKey] = useState("");
+
+  const getEffectiveApiKey = () => {
+    if (userApiKey.trim()) return userApiKey.trim();
+    const envKey = process.env.QDS_API_KEY || process.env.GEMINI_API_KEY || "";
+    if (envKey && envKey !== "MY_GEMINI_API_KEY" && envKey !== "undefined" && envKey !== "null") {
+      return envKey;
+    }
+    return "";
+  };
+
+  const saveApiKey = (keyToSave: string) => {
+    const trimmed = keyToSave.trim();
+    setUserApiKey(trimmed);
+    localStorage.setItem("user_gemini_api_key", trimmed);
+    setShowKeyModal(false);
+    if (trimmed) setError("");
+  };
+
   const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -79,37 +104,99 @@ export default function App() {
     }
   };
 
+  const scrapeWebPage = async (targetUrl: string) => {
+    // 1. Try server proxy endpoint first (works in Dev / Node container)
+    try {
+      const scrapeResponse = await fetch("/api/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: targetUrl }),
+      });
+
+      if (scrapeResponse.ok) {
+        const data = await scrapeResponse.json();
+        if (data.title || data.description || data.content) {
+          return data;
+        }
+      }
+    } catch (e) {
+      console.warn("Backend scraping endpoint unavailable (e.g. running on GitHub Pages), switching to client fallback...", e);
+    }
+
+    // 2. Client-side fallback using CORS proxy (works on GitHub Pages)
+    try {
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+      const res = await fetch(proxyUrl);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.contents) {
+          const doc = new DOMParser().parseFromString(json.contents, "text/html");
+          const title = doc.querySelector("title")?.textContent || doc.querySelector('meta[property="og:title"]')?.getAttribute("content") || "";
+          const description = doc.querySelector('meta[name="description"]')?.getAttribute("content") || doc.querySelector('meta[property="og:description"]')?.getAttribute("content") || "";
+          
+          let content = "";
+          doc.querySelectorAll("p, h1, h2, h3").forEach((el) => {
+            const txt = el.textContent?.trim() || "";
+            if (txt.length > 25) content += txt + "\n";
+          });
+
+          return {
+            title: title.trim(),
+            description: description.trim(),
+            content: content.trim().substring(0, 2000),
+            url: targetUrl
+          };
+        }
+      }
+    } catch (corsErr) {
+      console.warn("CORS proxy failed, extracting metadata from URL", corsErr);
+    }
+
+    // 3. Fallback to parsing product slug from URL
+    try {
+      const urlObj = new URL(targetUrl);
+      const pathSlug = urlObj.pathname.split("/").filter(Boolean).pop() || "";
+      const cleanTitle = decodeURIComponent(pathSlug).replace(/[-_]/g, " ").replace(/\.(html|php|aspx?)$/i, "");
+      return {
+        title: cleanTitle || "Sản phẩm thể thao " + urlObj.hostname,
+        description: `Sản phẩm đồ thể thao cao cấp thuộc hệ thống ${urlObj.hostname}`,
+        content: `Thông tin chi tiết sản phẩm đồ thể thao tại ${targetUrl}`,
+        url: targetUrl
+      };
+    } catch (urlErr) {
+      return {
+        title: "Sản phẩm Quang Dũng Sport",
+        description: "Đồ thể thao chất lượng cao",
+        content: targetUrl,
+        url: targetUrl
+      };
+    }
+  };
+
   const handleGenerate = async () => {
     if (!url) {
       setError("Vui lòng nhập URL website!");
       return;
     }
+
+    const apiKey = getEffectiveApiKey();
+    if (!apiKey) {
+      setTempApiKey(userApiKey);
+      setShowKeyModal(true);
+      setError("Vui lòng nhập Gemini API Key để tiếp tục sử dụng ứng dụng trên GitHub Pages.");
+      return;
+    }
+
     setError("");
     setLoading(true);
     setGeneratedPost("");
     setGeneratedImage("");
 
     try {
-      // 1. Scrape content via our proxy
-      const scrapeResponse = await fetch("/api/scrape", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-
-      if (!scrapeResponse.ok) {
-        throw new Error("Không thể lấy dữ liệu từ website này.");
-      }
-
-      const scrapedData = await scrapeResponse.json();
+      // 1. Scrape content (with client fallback for static hosts)
+      const scrapedData = await scrapeWebPage(url);
 
       // 2. Initialize Gemini AI
-      const apiKey = process.env.QDS_API_KEY || process.env.GEMINI_API_KEY;
-      
-      if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "" || apiKey === "undefined") {
-        throw new Error("Lỗi: Không tìm thấy API Key. Vui lòng thêm khóa vào mục Secrets (QDS_API_KEY hoặc GEMINI_API_KEY) trong AI Studio.");
-      }
-
       const ai = new GoogleGenAI({ apiKey });
       
       const prompt = `
@@ -141,8 +228,9 @@ export default function App() {
     } catch (err: any) {
       console.error("Gemini Error Detail:", err);
       const errorMessage = typeof err === 'string' ? err : err.message || "";
-      if (errorMessage.includes("API key not valid") || errorMessage.includes("400")) {
-        setError("API Key không hợp lệ hoặc không có quyền truy cập. Vui lòng kiểm tra lại cấu hình Secrets.");
+      if (errorMessage.includes("API key not valid") || errorMessage.includes("400") || errorMessage.includes("PERMISSION_DENIED") || errorMessage.includes("403")) {
+        setError("API Key không hợp lệ hoặc thiếu quyền. Nhấn nút 'Cài đặt API Key' để cập nhật Key mới từ Google AI Studio.");
+        setShowKeyModal(true);
       } else if (errorMessage.includes("503") || errorMessage.includes("high demand")) {
         setError("Hành tinh AI đang bận (Quá tải). Vui lòng đợi 30 giây rồi nhấn 'Tạo lại' nhé!");
       } else if (errorMessage.includes("404") || errorMessage.includes("not found")) {
@@ -157,12 +245,17 @@ export default function App() {
 
   const handleGenerateImage = async () => {
     if (!generatedPost) return;
+    const apiKey = getEffectiveApiKey();
+    if (!apiKey) {
+      setShowKeyModal(true);
+      return;
+    }
+
     setLoadingImage(true);
     setError("");
 
     try {
-      const apiKey = process.env.QDS_API_KEY || process.env.GEMINI_API_KEY;
-      const ai = new GoogleGenAI({ apiKey: apiKey! });
+      const ai = new GoogleGenAI({ apiKey });
 
       let enhancedPrompt = "";
       
@@ -221,7 +314,6 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("Image Gen Error:", err);
-      // Chuyển lỗi sang string để kiểm tra kỹ hơn các mã lỗi lồng nhau
       const errorStr = JSON.stringify(err);
       
       if (errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("RESOURCE_EXHAUSTED")) {
@@ -230,7 +322,6 @@ export default function App() {
         setError("Không thể kết nối AI tạo ảnh. Đã chuyển sang chế độ ảnh minh họa phù hợp.");
       }
 
-      // Fallback thông minh dựa trên nội dung bài viết
       let searchKeyword = "sport-fitness";
       const content = generatedPost.toLowerCase();
       
@@ -244,7 +335,6 @@ export default function App() {
       else if (content.includes("đua xe") || content.includes("xe đạp")) searchKeyword = "cycling";
 
       const randomSeed = Math.floor(Math.random() * 5000);
-      // Sử dụng URL chuyên tìm ảnh Unsplash chất lượng cao theo keyword
       setGeneratedImage(`https://images.unsplash.com/photo-1517836357463-d25dfeac3438?w=1024&q=80&sig=${randomSeed}&fit=crop&q=80&keyword=${encodeURIComponent(searchKeyword)}`);
     } finally {
       setLoadingImage(false);
@@ -257,6 +347,12 @@ export default function App() {
       else if (!generatedPost) setError("Hãy tạo bài viết Facebook trước để AI có nội dung tham khảo!");
       return;
     }
+
+    const apiKey = getEffectiveApiKey();
+    if (!apiKey) {
+      setShowKeyModal(true);
+      return;
+    }
     
     setLoadingVideo(true);
     setGeneratedVideoScript("");
@@ -264,8 +360,7 @@ export default function App() {
     setError("");
 
     try {
-      const apiKey = process.env.QDS_API_KEY || process.env.GEMINI_API_KEY;
-      const ai = new GoogleGenAI({ apiKey: apiKey! });
+      const ai = new GoogleGenAI({ apiKey });
       
       const prompt = `
         Bạn là chuyên gia sáng tạo video ngắn (TikTok/Reels/Shorts) chuyên nghiệp.
@@ -338,6 +433,20 @@ export default function App() {
       </div>
 
       <div className="relative max-w-6xl mx-auto px-4 py-12 md:py-20 flex flex-col items-center">
+        {/* Top Right API Key Settings Button */}
+        <div className="w-full flex justify-end mb-4">
+          <button
+            onClick={() => {
+              setTempApiKey(userApiKey);
+              setShowKeyModal(true);
+            }}
+            className="flex items-center gap-2 bg-neutral-800/80 hover:bg-neutral-700 border border-neutral-700 text-xs font-semibold px-4 py-2 rounded-full transition-all text-neutral-300 shadow-md"
+          >
+            <Key className="w-3.5 h-3.5 text-orange-500" />
+            <span>{getEffectiveApiKey() ? "API Key: Đã cài" : "Cài đặt API Key"}</span>
+          </button>
+        </div>
+
         {/* Header */}
         <motion.div 
           initial={{ opacity: 0, y: -20 }}
@@ -699,6 +808,88 @@ export default function App() {
           © 2024 QUANG DŨNG SPORT • THIẾT KẾ CHO HIỆU SUẤT CAO
         </footer>
       </div>
+
+      {/* API Key Settings Modal */}
+      <AnimatePresence>
+        {showKeyModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-neutral-800 border border-neutral-700 rounded-3xl p-6 md:p-8 max-w-md w-full shadow-2xl relative"
+            >
+              <button
+                onClick={() => setShowKeyModal(false)}
+                className="absolute right-5 top-5 text-neutral-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-3 bg-orange-600/10 border border-orange-600/20 rounded-2xl text-orange-500">
+                  <Key className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-lg">Cấu hình Gemini API Key</h3>
+                  <p className="text-xs text-neutral-400">Yêu cầu khi chạy trang web trên GitHub Pages</p>
+                </div>
+              </div>
+
+              <p className="text-sm text-neutral-300 mb-4 leading-relaxed">
+                Nhập Gemini API Key của bạn để sử dụng đầy đủ các tính năng AI (tạo bài viết, thiết kế ảnh quảng cáo, kịch bản video). Key sẽ được lưu an toàn trong trình duyệt của bạn.
+              </p>
+
+              <div className="mb-6">
+                <label htmlFor="api-key-input" className="block text-xs font-bold uppercase tracking-wider text-neutral-400 mb-2">
+                  Gemini API Key
+                </label>
+                <input
+                  id="api-key-input"
+                  type="password"
+                  placeholder="AIzaSy..."
+                  value={tempApiKey}
+                  onChange={(e) => setTempApiKey(e.target.value)}
+                  className="w-full bg-neutral-900 border border-neutral-700 focus:border-orange-500 outline-none rounded-xl p-3 text-sm text-neutral-100 font-mono"
+                />
+                <div className="mt-2 text-xs text-neutral-400 flex items-center justify-between">
+                  <span>Chưa có API Key?</span>
+                  <a
+                    href="https://aistudio.google.com/app/apikey"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-orange-400 hover:underline inline-flex items-center gap-1 font-semibold"
+                  >
+                    Lấy Key miễn phí tại Google AI Studio <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => saveApiKey(tempApiKey)}
+                  className="flex-1 bg-orange-600 hover:bg-orange-500 text-white font-bold py-3 rounded-xl transition-colors text-sm"
+                >
+                  Lưu API Key
+                </button>
+                {userApiKey && (
+                  <button
+                    onClick={() => saveApiKey("")}
+                    className="bg-neutral-700 hover:bg-neutral-600 text-neutral-300 font-semibold px-4 rounded-xl transition-colors text-sm"
+                  >
+                    Xóa Key
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

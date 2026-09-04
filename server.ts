@@ -55,6 +55,98 @@ async function startServer() {
     }
   });
 
+  // API Route to verify Facebook Access Token & Account/Page Info
+  app.post("/api/facebook/verify", async (req, res) => {
+    const { accessToken, targetId, targetType } = req.body;
+    if (!accessToken) {
+      return res.status(400).json({ error: "Access Token is required" });
+    }
+
+    try {
+      const endpointId = targetId && targetId.trim() ? targetId.trim() : "me";
+      const fbRes = await axios.get(`https://graph.facebook.com/v21.0/${endpointId}`, {
+        params: {
+          fields: "id,name,picture.type(large),link,category",
+          access_token: accessToken,
+        },
+        timeout: 10000,
+      });
+
+      res.json({
+        success: true,
+        account: {
+          id: fbRes.data.id,
+          name: fbRes.data.name,
+          category: fbRes.data.category || (targetType === "page" ? "Fanpage" : "Trang cá nhân"),
+          picture: fbRes.data.picture?.data?.url || null,
+        },
+      });
+    } catch (error: any) {
+      console.error("Facebook verify error:", error.response?.data || error.message);
+      const fbError = error.response?.data?.error?.message || "Không thể kết nối đến Facebook. Vui lòng kiểm tra lại Access Token và Page ID.";
+      res.status(400).json({ error: fbError });
+    }
+  });
+
+  // API Route to automatically publish a post/photo to Facebook Fanpage or Profile
+  app.post("/api/facebook/publish", async (req, res) => {
+    const { accessToken, targetId, message, link, imageUrl } = req.body;
+    if (!accessToken) {
+      return res.status(400).json({ error: "Access Token is required" });
+    }
+    if (!message) {
+      return res.status(400).json({ error: "Post message content is required" });
+    }
+
+    const destination = targetId && targetId.trim() ? targetId.trim() : "me";
+
+    try {
+      let fbRes;
+      if (imageUrl && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
+        // Publish as Photo with caption
+        fbRes = await axios.post(
+          `https://graph.facebook.com/v21.0/${destination}/photos`,
+          null,
+          {
+            params: {
+              url: imageUrl,
+              caption: message,
+              access_token: accessToken,
+            },
+            timeout: 20000,
+          }
+        );
+      } else {
+        // Publish as Feed status with optional link
+        const params: Record<string, string> = {
+          message,
+          access_token: accessToken,
+        };
+        if (link) params.link = link;
+
+        fbRes = await axios.post(
+          `https://graph.facebook.com/v21.0/${destination}/feed`,
+          null,
+          {
+            params,
+            timeout: 20000,
+          }
+        );
+      }
+
+      const postId = fbRes.data.id || fbRes.data.post_id;
+      res.json({
+        success: true,
+        postId,
+        url: `https://www.facebook.com/${postId}`,
+      });
+    } catch (error: any) {
+      console.error("Facebook publish error:", error.response?.data || error.message);
+      const fbError = error.response?.data?.error?.message || "Đăng bài thất bại. Vui lòng kiểm tra quyền hạn của Access Token (pages_manage_posts) hoặc Page ID.";
+      res.status(400).json({ error: fbError });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

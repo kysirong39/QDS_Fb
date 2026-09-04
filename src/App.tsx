@@ -17,7 +17,14 @@ import {
   Video,
   Key,
   Settings,
-  X
+  X,
+  Share2,
+  CheckCircle2,
+  AlertCircle,
+  HelpCircle,
+  Layers,
+  Sparkles,
+  ShieldCheck
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -91,6 +98,259 @@ export default function App() {
     localStorage.setItem("user_gemini_api_key", trimmed);
     setShowKeyModal(false);
     if (trimmed) setError("");
+  };
+
+  // Facebook Connection & Auto-Publishing State
+  const [fbConfig, setFbConfig] = useState<{
+    targetType: "page" | "profile";
+    pageId: string;
+    pageName: string;
+    category?: string;
+    avatar?: string;
+    accessToken: string;
+    autoAttachImage: boolean;
+    isConnected: boolean;
+  }>(() => {
+    try {
+      const saved = localStorage.getItem("qds_facebook_config");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error("Failed to load FB config from localStorage", e);
+    }
+    return {
+      targetType: "page",
+      pageId: "",
+      pageName: "",
+      category: "",
+      avatar: "",
+      accessToken: "",
+      autoAttachImage: true,
+      isConnected: false,
+    };
+  });
+
+  const [showFbModal, setShowFbModal] = useState(false);
+  const [tempFbConfig, setTempFbConfig] = useState(fbConfig);
+  const [verifyingFb, setVerifyingFb] = useState(false);
+  const [verifyError, setVerifyError] = useState("");
+  const [verifySuccess, setVerifySuccess] = useState("");
+  const [publishingFb, setPublishingFb] = useState(false);
+  const [publishSuccess, setPublishSuccess] = useState<{ postId: string; postUrl: string } | null>(null);
+  const [publishError, setPublishError] = useState("");
+  const [showFbGuide, setShowFbGuide] = useState(false);
+
+  const handleVerifyFacebook = async (configToVerify: typeof fbConfig) => {
+    if (!configToVerify.accessToken.trim()) {
+      setVerifyError("Vui lòng nhập Facebook Access Token!");
+      return null;
+    }
+    setVerifyingFb(true);
+    setVerifyError("");
+    setVerifySuccess("");
+
+    const target = configToVerify.targetType === "page" && configToVerify.pageId.trim()
+      ? configToVerify.pageId.trim()
+      : "me";
+
+    // 1. Try server verification route
+    try {
+      const res = await fetch("/api/facebook/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accessToken: configToVerify.accessToken.trim(),
+          targetId: target,
+          targetType: configToVerify.targetType,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.account) {
+          const updated = {
+            ...configToVerify,
+            pageId: data.account.id || configToVerify.pageId,
+            pageName: data.account.name || "Facebook",
+            category: data.account.category || (configToVerify.targetType === "page" ? "Fanpage" : "Trang cá nhân"),
+            avatar: data.account.picture || "",
+            isConnected: true,
+          };
+          setTempFbConfig(updated);
+          setVerifySuccess(`Kết nối thành công: ${data.account.name} (ID: ${data.account.id})`);
+          return updated;
+        }
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        if (errJson.error) {
+          throw new Error(errJson.error);
+        }
+      }
+    } catch (serverErr: any) {
+      console.warn("Backend verify failed, attempting direct Graph API check...", serverErr);
+      
+      // 2. Direct Graph API fallback (for GitHub Pages static hosting)
+      try {
+        const graphRes = await fetch(
+          `https://graph.facebook.com/v21.0/${target}?fields=id,name,picture.type(large),category&access_token=${encodeURIComponent(configToVerify.accessToken.trim())}`
+        );
+        const graphData = await graphRes.json();
+        if (graphData.error) {
+          throw new Error(graphData.error.message || "Access Token không hợp lệ hoặc đã hết hạn.");
+        }
+        const updated = {
+          ...configToVerify,
+          pageId: graphData.id || configToVerify.pageId,
+          pageName: graphData.name || "Facebook",
+          category: graphData.category || (configToVerify.targetType === "page" ? "Fanpage" : "Trang cá nhân"),
+          avatar: graphData.picture?.data?.url || "",
+          isConnected: true,
+        };
+        setTempFbConfig(updated);
+        setVerifySuccess(`Kết nối thành công: ${graphData.name} (ID: ${graphData.id})`);
+        return updated;
+      } catch (directErr: any) {
+        setVerifyError(directErr.message || "Không thể kết nối với Facebook. Vui lòng kiểm tra lại Access Token và Page ID.");
+        return null;
+      }
+    } finally {
+      setVerifyingFb(false);
+    }
+  };
+
+  const handleSaveFbConfig = (configToSave: typeof fbConfig) => {
+    setFbConfig(configToSave);
+    localStorage.setItem("qds_facebook_config", JSON.stringify(configToSave));
+    setShowFbModal(false);
+    setPublishError("");
+  };
+
+  const handleDisconnectFb = () => {
+    const reset = {
+      targetType: "page" as const,
+      pageId: "",
+      pageName: "",
+      category: "",
+      avatar: "",
+      accessToken: "",
+      autoAttachImage: true,
+      isConnected: false,
+    };
+    setFbConfig(reset);
+    setTempFbConfig(reset);
+    localStorage.removeItem("qds_facebook_config");
+    setVerifySuccess("");
+    setVerifyError("");
+  };
+
+  const handlePublishToFacebook = async () => {
+    if (!generatedPost) {
+      setError("Chưa có nội dung bài viết để đăng!");
+      return;
+    }
+
+    if (!fbConfig.accessToken || !fbConfig.isConnected) {
+      setTempFbConfig({ ...fbConfig });
+      setShowFbModal(true);
+      setPublishError("Vui lòng cấu hình và kiểm tra kết nối Facebook trước khi đăng bài!");
+      return;
+    }
+
+    setPublishingFb(true);
+    setPublishError("");
+    setPublishSuccess(null);
+
+    const destination = fbConfig.targetType === "page" && fbConfig.pageId.trim()
+      ? fbConfig.pageId.trim()
+      : "me";
+
+    const postImage = fbConfig.autoAttachImage && generatedImage ? generatedImage : undefined;
+
+    // 1. Try server publish endpoint
+    try {
+      const res = await fetch("/api/facebook/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          accessToken: fbConfig.accessToken.trim(),
+          targetId: destination,
+          message: generatedPost,
+          link: url || `https://${SHOP_INFO.website}`,
+          imageUrl: postImage,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setPublishSuccess({
+            postId: data.postId,
+            postUrl: data.url || `https://www.facebook.com/${data.postId}`,
+          });
+          setPublishingFb(false);
+          return;
+        }
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        if (errJson.error) {
+          throw new Error(errJson.error);
+        }
+      }
+    } catch (serverErr: any) {
+      console.warn("Backend publish failed, attempting direct Graph API posting...", serverErr);
+    }
+
+    // 2. Direct Graph API fallback (works on GitHub Pages static host)
+    try {
+      let directRes;
+      if (postImage && (postImage.startsWith("http://") || postImage.startsWith("https://"))) {
+        const formParams = new URLSearchParams();
+        formParams.append("url", postImage);
+        formParams.append("caption", generatedPost);
+        formParams.append("access_token", fbConfig.accessToken.trim());
+
+        directRes = await fetch(`https://graph.facebook.com/v21.0/${destination}/photos`, {
+          method: "POST",
+          body: formParams,
+        });
+      } else {
+        const formParams = new URLSearchParams();
+        formParams.append("message", generatedPost);
+        formParams.append("access_token", fbConfig.accessToken.trim());
+        if (url) formParams.append("link", url);
+
+        directRes = await fetch(`https://graph.facebook.com/v21.0/${destination}/feed`, {
+          method: "POST",
+          body: formParams,
+        });
+      }
+
+      const data = await directRes.json();
+      if (data.error) {
+        throw new Error(data.error.message || "Facebook từ chối yêu cầu đăng bài.");
+      }
+
+      const postId = data.id || data.post_id;
+      setPublishSuccess({
+        postId,
+        postUrl: `https://www.facebook.com/${postId}`,
+      });
+    } catch (err: any) {
+      console.error("Facebook publish error:", err);
+      setPublishError(err.message || "Không thể đăng bài lên Facebook. Vui lòng kiểm tra quyền hạn của Access Token (cần pages_manage_posts đối với Fanpage).");
+    } finally {
+      setPublishingFb(false);
+    }
+  };
+
+  const handleQuickShareToFacebook = () => {
+    if (!generatedPost) return;
+    navigator.clipboard.writeText(generatedPost);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+
+    const shareTargetUrl = url && url.startsWith("http") ? url : `https://${SHOP_INFO.website}`;
+    const sharerUrl = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shareTargetUrl)}&quote=${encodeURIComponent(generatedPost.slice(0, 300) + "...")}`;
+    window.open(sharerUrl, "_blank", "width=650,height=600,scrollbars=yes,resizable=yes");
   };
 
   const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
@@ -433,8 +693,33 @@ export default function App() {
       </div>
 
       <div className="relative max-w-6xl mx-auto px-4 py-12 md:py-20 flex flex-col items-center">
-        {/* Top Right API Key Settings Button */}
-        <div className="w-full flex justify-end mb-4">
+        {/* Top Right Action Buttons: Facebook Connection & API Key */}
+        <div className="w-full flex justify-end items-center gap-3 mb-4">
+          <button
+            onClick={() => {
+              setTempFbConfig({ ...fbConfig });
+              setVerifyError("");
+              setVerifySuccess("");
+              setShowFbModal(true);
+            }}
+            className={`flex items-center gap-2 border text-xs font-semibold px-4 py-2 rounded-full transition-all shadow-md ${
+              fbConfig.isConnected
+                ? "bg-blue-950/60 hover:bg-blue-900/60 border-blue-600/50 text-blue-300"
+                : "bg-neutral-800/80 hover:bg-neutral-700 border-neutral-700 text-neutral-300"
+            }`}
+          >
+            <Facebook className={`w-3.5 h-3.5 ${fbConfig.isConnected ? "text-blue-400 fill-blue-400" : "text-blue-400"}`} />
+            {fbConfig.isConnected ? (
+              <span className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="max-w-[140px] truncate">{fbConfig.pageName}</span>
+                <span className="text-[10px] text-blue-400/80">({fbConfig.targetType === "page" ? "Page" : "Cá nhân"})</span>
+              </span>
+            ) : (
+              <span>Kết nối Facebook</span>
+            )}
+          </button>
+
           <button
             onClick={() => {
               setTempApiKey(userApiKey);
@@ -781,22 +1066,179 @@ export default function App() {
                 </AnimatePresence>
               </div>
 
-              {generatedPost && (
+              {/* Post Action & Facebook Auto-Publishing Box */}
+              {generatedPost && activeTab === "post" && (
+                <div className="p-4 px-6 mb-4 flex flex-col gap-3 bg-neutral-900/60 rounded-2xl mx-4 border border-neutral-800">
+                  {/* Connection Header & Toggle */}
+                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-neutral-800 text-xs">
+                    <div className="flex items-center gap-2">
+                      <div className={`p-1.5 rounded-lg ${fbConfig.isConnected ? "bg-blue-600/20 text-blue-400" : "bg-neutral-800 text-neutral-400"}`}>
+                        <Facebook className="w-4 h-4" />
+                      </div>
+                      <div>
+                        {fbConfig.isConnected ? (
+                          <div className="flex items-center gap-1.5 font-semibold text-neutral-200">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+                            <span>Đăng tới: <strong>{fbConfig.pageName}</strong></span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-900/50 text-blue-300 border border-blue-700/50">
+                              {fbConfig.targetType === "page" ? "Fanpage" : "Trang cá nhân"}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-neutral-400">
+                            Chưa cấu hình tự động đăng Fanpage/Facebook
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        setTempFbConfig({ ...fbConfig });
+                        setVerifyError("");
+                        setVerifySuccess("");
+                        setShowFbModal(true);
+                      }}
+                      className="text-xs text-orange-400 hover:text-orange-300 underline flex items-center gap-1 font-semibold"
+                    >
+                      <Settings className="w-3 h-3" />
+                      {fbConfig.isConnected ? "Đổi trang/Cấu hình" : "Cài đặt kết nối"}
+                    </button>
+                  </div>
+
+                  {/* Auto attach image checkbox */}
+                  {generatedImage && (
+                    <label className="flex items-center gap-2 text-xs text-neutral-300 cursor-pointer select-none py-1">
+                      <input
+                        type="checkbox"
+                        checked={fbConfig.autoAttachImage}
+                        onChange={(e) => {
+                          const updated = { ...fbConfig, autoAttachImage: e.target.checked };
+                          setFbConfig(updated);
+                          localStorage.setItem("qds_facebook_config", JSON.stringify(updated));
+                        }}
+                        className="rounded border-neutral-700 text-orange-600 focus:ring-orange-500 accent-orange-600"
+                      />
+                      <span>Đính kèm ảnh sản phẩm AI vừa thiết kế lên bài đăng Facebook</span>
+                    </label>
+                  )}
+
+                  {/* Success Alert */}
+                  {publishSuccess && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="p-3 bg-emerald-950/50 border border-emerald-600/40 rounded-xl flex items-center justify-between gap-3 text-xs text-emerald-300"
+                    >
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                        <span>Bài viết đã được đăng thành công lên Facebook!</span>
+                      </div>
+                      <a
+                        href={publishSuccess.postUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg font-bold flex items-center gap-1 transition-colors shrink-0"
+                      >
+                        Xem bài viết <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </motion.div>
+                  )}
+
+                  {/* Error Alert */}
+                  {publishError && (
+                    <motion.div
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="p-3 bg-red-950/50 border border-red-600/40 rounded-xl flex items-start gap-2 text-xs text-red-300"
+                    >
+                      <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p>{publishError}</p>
+                        <button
+                          onClick={() => {
+                            setTempFbConfig({ ...fbConfig });
+                            setShowFbModal(true);
+                          }}
+                          className="mt-1 underline font-semibold text-red-200 hover:text-white"
+                        >
+                          Mở cấu hình để kiểm tra lại Access Token & quyền hạn ↗
+                        </button>
+                      </div>
+                    </motion.div>
+                  )}
+
+                  {/* Action Buttons */}
+                  <div className="flex flex-col sm:flex-row gap-3 pt-1">
+                    {/* Direct Auto-Publish Button */}
+                    <button
+                      onClick={handlePublishToFacebook}
+                      disabled={publishingFb}
+                      className="flex-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:from-neutral-700 disabled:to-neutral-700 disabled:cursor-not-allowed text-white font-bold text-xs uppercase tracking-wider py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-900/30 transition-all active:scale-95"
+                    >
+                      {publishingFb ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Đang đăng lên Facebook...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Facebook className="w-4 h-4 fill-white" />
+                          <span>
+                            {fbConfig.isConnected
+                              ? `Đăng tự động (${fbConfig.targetType === "page" ? "Fanpage" : "Cá nhân"})`
+                              : "Đăng tự động lên Facebook"}
+                          </span>
+                        </>
+                      )}
+                    </button>
+
+                    {/* Quick Web Share Button */}
+                    <button
+                      onClick={handleQuickShareToFacebook}
+                      className="sm:w-auto bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 font-semibold text-xs py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 transition-colors"
+                      title="Sao chép nội dung và mở cửa sổ chia sẻ chính thức của Facebook"
+                    >
+                      <Share2 className="w-4 h-4 text-blue-400" />
+                      <span>Chia sẻ nhanh (Popup)</span>
+                    </button>
+
+                    {/* Refresh Post Button */}
+                    <button
+                      onClick={handleGenerate}
+                      disabled={loading}
+                      className="sm:w-auto bg-neutral-800/80 hover:bg-neutral-700 border border-neutral-700 text-neutral-300 font-semibold text-xs py-3.5 px-4 rounded-xl flex items-center justify-center gap-1.5 transition-colors"
+                      title="Tạo lại nội dung bài viết mới"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+                      <span>Viết lại</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Video Tab Action */}
+              {generatedVideoScript && activeTab === "video" && (
                 <div className="p-4 px-6 mb-4 flex gap-4">
-                   <button 
-                    onClick={handleGenerate}
-                    className="flex-1 text-xs font-bold uppercase tracking-widest bg-neutral-800 hover:bg-neutral-700 transition-colors py-3 rounded-xl border border-neutral-700"
+                  <button 
+                    onClick={handleGenerateVideoScript}
+                    disabled={loadingVideo}
+                    className="flex-1 text-xs font-bold uppercase tracking-widest bg-neutral-800 hover:bg-neutral-700 transition-colors py-3 rounded-xl border border-neutral-700 flex items-center justify-center gap-2"
                   >
-                    Làm mới bài viết
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingVideo ? "animate-spin" : ""}`} />
+                    <span>Tạo lại kịch bản</span>
                   </button>
-                  <a 
-                    href={`https://facebook.com`} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="flex-1 text-xs font-bold uppercase tracking-widest bg-blue-600 hover:bg-blue-500 transition-colors py-3 rounded-xl flex items-center justify-center gap-2"
+                  <button 
+                    onClick={() => {
+                      navigator.clipboard.writeText(generatedVideoScript);
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 2000);
+                    }}
+                    className="flex-1 text-xs font-bold uppercase tracking-widest bg-orange-600 hover:bg-orange-500 transition-colors py-3 rounded-xl flex items-center justify-center gap-2 text-white font-bold"
                   >
-                    Mở Facebook <ExternalLink className="w-3 h-3" />
-                  </a>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Sao chép kịch bản</span>
+                  </button>
                 </div>
               )}
             </div>
@@ -885,6 +1327,237 @@ export default function App() {
                     Xóa Key
                   </button>
                 )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Facebook Connection Settings Modal */}
+      <AnimatePresence>
+        {showFbModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-neutral-850 border border-neutral-700 rounded-3xl p-6 md:p-8 max-w-lg w-full shadow-2xl relative my-8"
+            >
+              <button
+                onClick={() => setShowFbModal(false)}
+                className="absolute right-5 top-5 text-neutral-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              {/* Modal Header */}
+              <div className="flex items-center gap-3 mb-6">
+                <div className="p-3 bg-blue-600/10 border border-blue-600/20 rounded-2xl text-blue-500">
+                  <Facebook className="w-6 h-6 fill-current" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-lg text-white">Cấu hình kết nối Facebook</h3>
+                  <p className="text-xs text-neutral-400">Tự động đăng bài lên Fanpage hoặc Trang cá nhân</p>
+                </div>
+              </div>
+
+              {/* Target Type Selector */}
+              <div className="mb-5">
+                <label className="block text-xs font-bold uppercase tracking-wider text-neutral-400 mb-2">
+                  Đích đăng bài
+                </label>
+                <div className="grid grid-cols-2 gap-2 bg-neutral-900/80 p-1 rounded-2xl border border-neutral-700/60">
+                  <button
+                    type="button"
+                    onClick={() => setTempFbConfig({ ...tempFbConfig, targetType: "page" })}
+                    className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                      tempFbConfig.targetType === "page"
+                        ? "bg-blue-600 text-white shadow-md"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    <span>Fanpage Facebook</span>
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-blue-800/80 text-blue-200">Khuyên dùng</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTempFbConfig({ ...tempFbConfig, targetType: "profile" })}
+                    className={`py-2.5 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
+                      tempFbConfig.targetType === "profile"
+                        ? "bg-blue-600 text-white shadow-md"
+                        : "text-neutral-400 hover:text-white"
+                    }`}
+                  >
+                    <span>Trang cá nhân</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Input Fields */}
+              <div className="space-y-4 mb-5">
+                {tempFbConfig.targetType === "page" ? (
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-neutral-400 mb-1.5">
+                      Facebook Page ID (Mã định danh Fanpage)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ví dụ: 108392019482910 hoặc quangdungsport"
+                      value={tempFbConfig.pageId}
+                      onChange={(e) => setTempFbConfig({ ...tempFbConfig, pageId: e.target.value })}
+                      className="w-full bg-neutral-900 border border-neutral-700 focus:border-blue-500 outline-none rounded-xl p-3 text-sm text-neutral-100 font-mono"
+                    />
+                    <p className="mt-1 text-[11px] text-neutral-500">
+                      ID của trang Facebook bạn đang quản trị (vào Giới thiệu trang để xem ID).
+                    </p>
+                  </div>
+                ) : (
+                  <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-300 leading-relaxed">
+                    💡 <strong>Lưu ý về Trang cá nhân:</strong> Theo chính sách bảo mật Meta, API chỉ cho phép đăng tự động lên tường cá nhân đối với tài khoản Quản trị viên/Tester của App. Bạn cũng có thể dùng nút <strong>"Chia sẻ nhanh (Popup)"</strong> trên trang chủ để đăng lên trang cá nhân trong 2 giây mà không cần token!
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-neutral-400 mb-1.5">
+                    {tempFbConfig.targetType === "page" ? "Page Access Token" : "User Access Token"}
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="EAAB..."
+                    value={tempFbConfig.accessToken}
+                    onChange={(e) => setTempFbConfig({ ...tempFbConfig, accessToken: e.target.value })}
+                    className="w-full bg-neutral-900 border border-neutral-700 focus:border-blue-500 outline-none rounded-xl p-3 text-sm text-neutral-100 font-mono"
+                  />
+                  <p className="mt-1 text-[11px] text-neutral-500">
+                    Mã truy cập có quyền <code>pages_manage_posts</code> và <code>pages_read_engagement</code>.
+                  </p>
+                </div>
+
+                {/* Auto Attach Image Checkbox */}
+                <label className="flex items-center gap-2 text-xs text-neutral-300 cursor-pointer pt-1">
+                  <input
+                    type="checkbox"
+                    checked={tempFbConfig.autoAttachImage}
+                    onChange={(e) => setTempFbConfig({ ...tempFbConfig, autoAttachImage: e.target.checked })}
+                    className="rounded border-neutral-700 text-blue-600 focus:ring-blue-500 accent-blue-600"
+                  />
+                  <span>Tự động đính kèm ảnh sản phẩm AI khi xuất bản</span>
+                </label>
+              </div>
+
+              {/* Verification Feedback */}
+              {verifySuccess && (
+                <div className="mb-4 p-3 bg-emerald-950/60 border border-emerald-500/40 rounded-xl text-xs text-emerald-300 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>{verifySuccess}</span>
+                </div>
+              )}
+
+              {verifyError && (
+                <div className="mb-4 p-3 bg-red-950/60 border border-red-500/40 rounded-xl text-xs text-red-300 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <span>{verifyError}</span>
+                </div>
+              )}
+
+              {/* Test Connection Button */}
+              <div className="mb-5">
+                <button
+                  type="button"
+                  onClick={() => handleVerifyFacebook(tempFbConfig)}
+                  disabled={verifyingFb}
+                  className="w-full bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 font-semibold text-xs py-2.5 rounded-xl transition-all flex items-center justify-center gap-2"
+                >
+                  {verifyingFb ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Đang kiểm tra kết nối với Facebook...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-4 h-4 text-blue-400" />
+                      <span>Kiểm tra kết nối Facebook</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* How to get Facebook Access Token Accordion */}
+              <div className="mb-6 border border-neutral-700/60 rounded-2xl bg-neutral-900/60 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowFbGuide(!showFbGuide)}
+                  className="w-full p-3.5 text-left text-xs font-bold text-neutral-300 hover:text-white flex items-center justify-between"
+                >
+                  <span className="flex items-center gap-2">
+                    <HelpCircle className="w-4 h-4 text-orange-400" />
+                    <span>Hướng dẫn lấy Access Token Facebook trong 1 phút</span>
+                  </span>
+                  <span className="text-neutral-500 text-sm">{showFbGuide ? "▲" : "▼"}</span>
+                </button>
+
+                {showFbGuide && (
+                  <div className="p-4 pt-1 border-t border-neutral-800 text-xs text-neutral-400 space-y-2.5 leading-relaxed">
+                    <p>
+                      <strong>Bước 1:</strong> Truy cập công cụ chính thức của Meta:{" "}
+                      <a
+                        href="https://developers.facebook.com/tools/explorer/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-400 hover:underline font-semibold inline-flex items-center gap-1"
+                      >
+                        Graph API Explorer <ExternalLink className="w-2.5 h-2.5" />
+                      </a>
+                    </p>
+                    <p>
+                      <strong>Bước 2:</strong> Ở góc phải, chọn <strong>Meta App</strong> của bạn. Tại mục <strong>User or Page</strong>, chọn Trang Fanpage (hoặc User Token).
+                    </p>
+                    <p>
+                      <strong>Bước 3:</strong> Tại mục <strong>Permissions</strong> (Quyền hạn), bấm Add a Permission và thêm:
+                      <br />
+                      • <code className="bg-neutral-800 text-neutral-200 px-1.5 py-0.5 rounded">pages_manage_posts</code>
+                      <br />
+                      • <code className="bg-neutral-800 text-neutral-200 px-1.5 py-0.5 rounded">pages_read_engagement</code>
+                      <br />
+                      • <code className="bg-neutral-800 text-neutral-200 px-1.5 py-0.5 rounded">pages_show_list</code>
+                    </p>
+                    <p>
+                      <strong>Bước 4:</strong> Bấm nút <strong>Generate Access Token</strong>, cấp quyền cho Fanpage của bạn, sau đó sao chép token dán vào ô bên trên.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Modal Action Buttons */}
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleSaveFbConfig(tempFbConfig)}
+                  className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition-colors text-sm shadow-lg shadow-blue-900/30"
+                >
+                  Lưu cấu hình
+                </button>
+                {fbConfig.isConnected && (
+                  <button
+                    type="button"
+                    onClick={handleDisconnectFb}
+                    className="bg-neutral-800 hover:bg-red-900/50 border border-neutral-700 hover:border-red-600/50 text-neutral-300 hover:text-red-300 font-semibold px-4 rounded-xl transition-colors text-xs"
+                  >
+                    Gỡ kết nối
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowFbModal(false)}
+                  className="bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-neutral-200 font-semibold px-4 rounded-xl transition-colors text-xs"
+                >
+                  Đóng
+                </button>
               </div>
             </motion.div>
           </motion.div>
